@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-china-macro",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "China's PBOC Loan Prime Rate (LPR) — 1-year and 5-year benchmark lending rates with reference dates. Keyless.",
   "type": "module",
   "main": "src/index.ts",
@@ -24,5 +24,9 @@
   "devDependencies": {
     "typescript": "^5.9.3",
     "@cloudflare/workers-types": "^4.20260405.1"
+  },
+  "pipeworx": {
+    "sourceHash": "v1-0505d3b8697377898f9446ae5204c5be21f1e381c2100880e983708d8faa4c1c",
+    "sourceCommit": "60f04b68c347e970c6be94a53439d1364061fc06"
   }
 }
