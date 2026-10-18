@@ -1,11 +1,10 @@
 # @pipeworx/china-macro
 
-China's PBOC Loan Prime Rate (贷款市场报价利率, LPR) — the 1-year and 5-year
-benchmark lending rates, with official reference dates, sourced live from
-chinamoney.com.cn (the National Interbank Funding Center, under PBOC
-authorization).
+China's PBOC Loan Prime Rate (贷款市场报价利率, LPR), National Bureau of
+Statistics headline indicators, 70-city house prices, SHIBOR and the
+government-bond yield curve — all keyless, sourced live.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1683+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1837+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
@@ -16,27 +15,63 @@ Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents 
 - `china_lpr_latest()` — the current 1-year/5-year LPR print and its reference
   date only, without the history. Cheaper when a caller just wants "the
   current rate".
+- `china_macro_indicator({ indicator, periods? })` — one tool across nine
+  headline indicators: `cpi`, `ppi`, `pmi` (manufacturing +
+  non-manufacturing), `gdp` (year-to-date cumulative, by sector), `industrial_production`
+  (industrial value-added growth), `retail_sales`, `fixed_asset_investment`,
+  `money_supply` (M0/M1/M2), and `trade` (monthly export/import totals).
+  Returns the latest period first, then up to `periods` (default 12, max 36)
+  months/quarters of history — every field translated from its Chinese NBS
+  name to an English name with its unit.
+- `china_house_prices({ city?, month? })` — the 70-city new-build and resale
+  residential price indexes. `city` (English name) for one city's history
+  (up to 24 months); `month` ("YYYY-MM") to pin a release; neither for the
+  latest month's full 70-city cross-section.
+- `china_rates({ series, days?, periods? })` — `series: "shibor"` for the
+  Shanghai Interbank Offered Rate across all 8 tenors (latest fixing + daily
+  history); `series: "yield_curve"` for the China Government Bond yield
+  curve (dated 1-year/10-year benchmark history plus the full real-time
+  quoted curve across all actively-traded maturities).
 
 ## Auth
 
-Keyless. No cookie or session — just a same-site `Referer` header, which the
-pack sends on every call.
+Keyless. No cookie or session — the LPR/SHIBOR/rates tools send a same-site
+`Referer` header; the macro-indicator and house-price tools send only a
+`User-Agent` and `Referer`.
 
 ## Data sources
 
-- `https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN` —
-  rolling ~1-year monthly history (`china_lpr`).
-- `https://www.chinamoney.com.cn/r/cms/www/chinamoney/data/currency/bk-lpr.json`
-  — latest print only (`china_lpr_latest`).
+- National Interbank Funding Center, under PBOC authorization — the Loan
+  Prime Rate (`china_lpr`, `china_lpr_latest`).
+- National Bureau of Statistics of China — CPI, PPI, PMI, GDP, industrial
+  value-added growth, retail sales, fixed-asset investment, money supply, and
+  the 70-city residential price index (`china_macro_indicator`,
+  `china_house_prices`).
+- General Administration of Customs of China — monthly export/import totals
+  (`china_macro_indicator({ indicator: "trade" })`).
+- China Foreign Exchange Trade System / National Interbank Funding Center —
+  the SHIBOR fixing and China Government Bond yields (`china_rates`).
 
-Both are the JSON endpoints chinamoney.com.cn's own chart widget calls, found
-via a browser network tab (fleet #1311) — the guessed export path
-(`LprHisExcel`) 200s with an empty body and is not usable. The history
-endpoint ignores date-range query parameters and always returns the same
+The LPR endpoints are the JSON calls chinamoney.com.cn's own chart widget
+makes, found via a browser network tab (fleet #1311) — the guessed export
+path (`LprHisExcel`) 200s with an empty body and is not usable. The LPR
+history call ignores date-range query parameters and always returns the same
 rolling ~12-row window ending at the latest announcement; there is no deeper
-history available through this call. LPR is announced monthly on the 20th (or
-the next business day) — expect `china_lpr_latest`'s `reference_date` to move
+history available through it. LPR is announced monthly on the 20th (or the
+next business day) — expect `china_lpr_latest`'s `reference_date` to move
 roughly once a month.
+
+The NBS/Customs indicators and the 70-city house-price index are served by
+the same republisher the broader China-equities catalog already calls live
+(fleet #3298) — the host is shared with `china-stocks`'s billboard/earnings
+reports, confirmed reachable from Cloudflare's edge since 2026-07-17. The
+SHIBOR history call and the government-bond yield curve calls are found the
+same way the LPR ones were, on chinamoney.com.cn's own SHIBOR and bond-yield
+pages; the real-time yield curve defaults to Treasury bonds. The 1-year/10-year
+benchmark series is the daily update chinamoney publishes under the IMF's
+Special Data Dissemination Standard (SDDS); it only exposes a page at a time
+(capped at 60 rows per call here) — request `periods` close to what you need
+rather than the daily maximum.
 
 ## Quick Start
 
@@ -82,7 +117,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1683+ data sources. The
+Both URLs reach the same gateway and the same 1837+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

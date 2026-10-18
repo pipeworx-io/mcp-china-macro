@@ -1,7 +1,7 @@
 {
   "name": "@pipeworx/mcp-china-macro",
-  "version": "0.1.2",
-  "description": "China's PBOC Loan Prime Rate (LPR) — 1-year and 5-year benchmark lending rates with reference dates. Keyless.",
+  "version": "0.1.3",
+  "description": "China macro: PBOC Loan Prime Rate, headline NBS indicators (via Eastmoney's data centre), 70-city house prices, SHIBOR and the CGB yield curve. Keyless.",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-ce38943a27d3b9e52caa06964ec2022d710b63c3a89e7cdc77b912b2adf1d10a",
-    "sourceCommit": "babdd280d475dceddecc9ebf8f2a661712781a81"
+    "sourceHash": "v1-d3a1162ec59c7da48fed1bf3dead52e96fc4337e9f03a6302fdedc9e6302498a",
+    "sourceCommit": "0f33463aa47677f38e4f177a4b4a7160dd80819f"
   }
 }

@@ -671,7 +671,8 @@ function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 /**
- * China's PBOC Loan Prime Rate (LPR) — 1-year and 5-year benchmark lending rates with reference dates. Keyless.
+ * China macro: PBOC Loan Prime Rate, headline NBS indicators (via Eastmoney's
+ * data centre), 70-city house prices, SHIBOR and the CGB yield curve. Keyless.
  *
  * PBOC Loan Prime Rate (贷款市场报价利率, LPR) — the 1-year and 5-year benchmark
  * lending rates China's central bank (via the National Interbank Funding
@@ -691,6 +692,36 @@ function collapse(s: string): string {
  * The history endpoint ignores date-range query params and always returns a
  * rolling window of ~12 monthly rows ending at the latest announcement — there
  * is no deeper history available from this call.
+ *
+ * Added 2026-10-18 (fleet #3298 — replaces the blocked direct-NBS route of
+ * #3238 with a keyless republisher of the SAME National Bureau of Statistics
+ * / PBOC figures, via Eastmoney's data-centre report API):
+ *
+ *  - china_macro_indicator — CPI, PPI, manufacturing/non-manufacturing PMI,
+ *    quarterly (YTD-cumulative) GDP, industrial value-added growth, retail
+ *    sales, fixed-asset investment, and M0/M1/M2 money supply, plus monthly
+ *    customs export/import totals. One tool, an `indicator` enum, each
+ *    mapped to its own Eastmoney RPT_ECONOMY_* reportName — same
+ *    datacenter-web.eastmoney.com host + report-API shape already live in
+ *    china-stocks (RPT_INDUSTRY_FUNDFLOW etc., verified CF-egress-OK
+ *    2026-07-17 and reconfirmed 2026-10-17 fleet #3242), so no new egress
+ *    risk. All ten reportNames probed keyless from a laptop 2026-10-18 and
+ *    again live here; field names translated from NBS's own Chinese column
+ *    names (same ones each report's data.eastmoney.com page displays).
+ *  - china_house_prices — the NBS 70-city new-build/resale residential price
+ *    indexes (index, prior-period = 100), by city and/or month. Same report
+ *    family (RPT_ECONOMY_HOUSE_PRICE), filterable server-side by CITY and
+ *    REPORT_DATE.
+ *  - china_rates — SHIBOR (all 8 tenors, latest + history) from
+ *    chinamoney.com.cn/CFETS (same host/shape as the LPR tools above, a
+ *    sibling `cm-u-bk-shibor/ShiborHis` endpoint found the same way), plus
+ *    the China Government Bond yield curve: the SDDS 1-year/10-year
+ *    benchmark series with dates (IMF Special Data Dissemination Standard
+ *    disclosure chinamoney publishes daily) and CFETS's real-time quoted
+ *    benchmark-bond curve across the full maturity range. The task's
+ *    candidate curve code "CYCC000" does not exist on chinamoney — the live
+ *    mechanism found by reading the page's own JS is `bondType=100101`
+ *    (国债/Treasury Bond) against the `RtimeYldCurv` endpoint.
  */
 
 
@@ -703,6 +734,45 @@ async function pwFetch(url: string, name: string): Promise<Response> {
     { method: 'POST', headers: { 'User-Agent': UA, Referer: REFERER, Accept: 'application/json' } },
     name,
   );
+}
+
+// Same chinamoney.com.cn host as the LPR calls above, different section
+// (bkshibor / bkcurvrty / sddsintigy) — each page's own Referer, same POST
+// shape. A generic version of pwFetch that takes its own Referer.
+async function pwFetchCM(url: string, referer: string, name: string): Promise<Response> {
+  return fetchWithTimeout(url, { method: 'POST', headers: { 'User-Agent': UA, Referer: referer, Accept: 'application/json' } }, name);
+}
+
+// Eastmoney's data-centre report API — the SAME host + shape china-stocks
+// already calls live for RPT_INDUSTRY_FUNDFLOW/RPT_DAILYBILLBOARD_* etc.
+// (datacenter-web.eastmoney.com, NOT the push2/push2his family, which is a
+// separate, sometimes-blocked host — see china-stocks's own notes). Keyless;
+// verified CF-egress-OK 2026-07-17, reconfirmed 2026-10-17.
+const EASTMONEY_DC = 'https://datacenter-web.eastmoney.com/api/data/v1/get';
+
+async function eastmoneyQuery(reportName: string, extra: Record<string, string> = {}): Promise<Array<Record<string, unknown>>> {
+  const qs = new URLSearchParams({
+    reportName,
+    columns: 'ALL',
+    source: 'WEB',
+    client: 'WEB',
+    sortColumns: 'REPORT_DATE',
+    sortTypes: '-1',
+    pageNumber: '1',
+    pageSize: '20',
+    ...extra,
+  });
+  const res = await fetchWithTimeout(
+    `${EASTMONEY_DC}?${qs}`,
+    { headers: { 'User-Agent': 'Mozilla/5.0 (pipeworx.io)', Referer: 'https://data.eastmoney.com/' } },
+    `Eastmoney data centre (${reportName})`,
+  );
+  if (!res.ok) throw await httpError(res, `Eastmoney data centre (${reportName})`);
+  const body = (await res.json()) as { success?: boolean; code?: number; message?: string; result?: { data?: Array<Record<string, unknown>> } | null };
+  if (body.success === false) {
+    throw new Error(`Eastmoney data centre error${body.code ? ` (${body.code})` : ''}: ${body.message ?? 'unknown error'} — reportName=${reportName}`);
+  }
+  return body.result?.data ?? [];
 }
 
 const HIS_URL = 'https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN';
@@ -775,6 +845,439 @@ async function lprHistory(args: Record<string, unknown>) {
   };
 }
 
+// ── china_macro_indicator ───────────────────────────────────────────
+
+/** "2026-09-01 00:00:00" -> "2026-09". Eastmoney's REPORT_DATE is always the
+ * first of the reference month/quarter at local midnight. */
+function periodFromReportDate(reportDate: unknown): string | null {
+  const s = typeof reportDate === 'string' ? reportDate : null;
+  if (!s) return null;
+  const m = s.match(/^(\d{4})-(\d{2})-\d{2}/);
+  return m ? `${m[1]}-${m[2]}` : s;
+}
+
+const INDICATOR_REPORTS: Record<string, string> = {
+  cpi: 'RPT_ECONOMY_CPI',
+  ppi: 'RPT_ECONOMY_PPI',
+  pmi: 'RPT_ECONOMY_PMI',
+  gdp: 'RPT_ECONOMY_GDP',
+  industrial_production: 'RPT_ECONOMY_INDUS_GROW',
+  retail_sales: 'RPT_ECONOMY_TOTAL_RETAIL',
+  fixed_asset_investment: 'RPT_ECONOMY_ASSET_INVEST',
+  money_supply: 'RPT_ECONOMY_CURRENCY_SUPPLY',
+  trade: 'RPT_ECONOMY_CUSTOMS',
+};
+
+const INDICATOR_LABELS: Record<string, string> = {
+  cpi: 'Consumer Price Index (CPI)',
+  ppi: 'Producer Price Index (PPI)',
+  pmi: 'Manufacturing & Non-Manufacturing Purchasing Managers’ Index (PMI)',
+  gdp: 'Gross Domestic Product (GDP), year-to-date cumulative',
+  industrial_production: 'Industrial value-added growth',
+  retail_sales: 'Total retail sales of consumer goods',
+  fixed_asset_investment: 'Fixed-asset investment (FAI)',
+  money_supply: 'Money supply (M0/M1/M2)',
+  trade: 'Customs export/import totals',
+};
+
+/** Translate one raw Eastmoney row (Chinese NBS field names) to English,
+ * per indicator. Each indicator's reportName has its own column shape. */
+function mapIndicatorRow(indicator: string, row: Record<string, unknown>): Record<string, unknown> {
+  const period = periodFromReportDate(row.REPORT_DATE);
+  const n = num;
+  switch (indicator) {
+    case 'cpi':
+      return {
+        period,
+        national_yoy_pct: n(row.NATIONAL_SAME),
+        national_mom_pct: n(row.NATIONAL_SEQUENTIAL),
+        national_index_prior_year_month_eq_100: n(row.NATIONAL_BASE),
+        national_ytd_avg_index_prior_year_eq_100: n(row.NATIONAL_ACCUMULATE),
+        urban_yoy_pct: n(row.CITY_SAME),
+        urban_mom_pct: n(row.CITY_SEQUENTIAL),
+        rural_yoy_pct: n(row.RURAL_SAME),
+        rural_mom_pct: n(row.RURAL_SEQUENTIAL),
+      };
+    case 'ppi':
+      return {
+        period,
+        yoy_pct: n(row.BASE_SAME),
+        index_prior_year_month_eq_100: n(row.BASE),
+        ytd_avg_index_prior_year_eq_100: n(row.BASE_ACCUMULATE),
+      };
+    case 'pmi':
+      return {
+        period,
+        manufacturing_pmi: n(row.MAKE_INDEX),
+        manufacturing_pmi_yoy_change_pts: n(row.MAKE_SAME),
+        non_manufacturing_pmi: n(row.NMAKE_INDEX),
+        non_manufacturing_pmi_yoy_change_pts: n(row.NMAKE_SAME),
+        note: 'PMI readings above 50 indicate expansion vs the prior month, below 50 contraction. *_yoy_change_pts is the published change vs the same month last year, in index points.',
+      };
+    case 'gdp': {
+      const timeLabel = typeof row.TIME === 'string' ? row.TIME : null;
+      return {
+        period,
+        period_label_cn: timeLabel,
+        gdp_ytd_cumulative_cny_100m: n(row.DOMESTICL_PRODUCT_BASE),
+        primary_sector_ytd_cumulative_cny_100m: n(row.FIRST_PRODUCT_BASE),
+        secondary_sector_ytd_cumulative_cny_100m: n(row.SECOND_PRODUCT_BASE),
+        tertiary_sector_ytd_cumulative_cny_100m: n(row.THIRD_PRODUCT_BASE),
+        gdp_yoy_pct: n(row.SUM_SAME),
+        primary_sector_yoy_pct: n(row.FIRST_SAME),
+        secondary_sector_yoy_pct: n(row.SECOND_SAME),
+        tertiary_sector_yoy_pct: n(row.THIRD_SAME),
+        note: 'NBS publishes GDP as a year-to-date cumulative figure through the stated quarter (e.g. "H1" = Q1+Q2 combined), not an isolated single quarter.',
+      };
+    }
+    case 'industrial_production':
+      return {
+        period,
+        value_added_yoy_pct: n(row.BASE_SAME),
+        value_added_ytd_yoy_pct: n(row.BASE_ACCUMULATE),
+      };
+    case 'retail_sales':
+      return {
+        period,
+        retail_sales_cny_100m: n(row.RETAIL_TOTAL),
+        retail_sales_yoy_pct: n(row.RETAIL_TOTAL_SAME),
+        retail_sales_mom_pct: n(row.RETAIL_TOTAL_SEQUENTIAL),
+        retail_sales_ytd_cumulative_cny_100m: n(row.RETAIL_TOTAL_ACCUMULATE),
+        retail_sales_ytd_yoy_pct: n(row.RETAIL_ACCUMULATE_SAME),
+      };
+    case 'fixed_asset_investment':
+      return {
+        period,
+        fai_monthly_cny_100m: n(row.BASE),
+        fai_yoy_pct: n(row.BASE_SAME),
+        fai_mom_pct: n(row.BASE_SEQUENTIAL),
+        fai_ytd_cumulative_cny_100m: n(row.BASE_ACCUMULATE),
+        note: 'NBS officially discloses fixed-asset investment only as a year-to-date cumulative figure; fai_monthly_* is Eastmoney’s own derived single-month breakout.',
+      };
+    case 'money_supply':
+      return {
+        period,
+        m2_outstanding_cny_100m: n(row.BASIC_CURRENCY),
+        m2_yoy_pct: n(row.BASIC_CURRENCY_SAME),
+        m2_mom_pct: n(row.BASIC_CURRENCY_SEQUENTIAL),
+        m1_outstanding_cny_100m: n(row.CURRENCY),
+        m1_yoy_pct: n(row.CURRENCY_SAME),
+        m1_mom_pct: n(row.CURRENCY_SEQUENTIAL),
+        m0_outstanding_cny_100m: n(row.FREE_CASH),
+        m0_yoy_pct: n(row.FREE_CASH_SAME),
+        m0_mom_pct: n(row.FREE_CASH_SEQUENTIAL),
+        note: 'M1 reflects the PBOC’s 2024 broadened definition (adds individual demand deposits and certain non-bank payment-account balances), so it is not comparable to pre-2024 M1 levels.',
+      };
+    case 'trade': {
+      const exportsUsdBn = n(row.EXIT_BASE);
+      const importsUsdBn = n(row.IMPORT_BASE);
+      return {
+        period,
+        exports_usd_bn: exportsUsdBn != null ? Math.round((exportsUsdBn / 1e6) * 1e4) / 1e4 : null,
+        exports_yoy_pct: n(row.EXIT_BASE_SAME),
+        exports_mom_pct: n(row.EXIT_BASE_SEQUENTIAL),
+        imports_usd_bn: importsUsdBn != null ? Math.round((importsUsdBn / 1e6) * 1e4) / 1e4 : null,
+        imports_yoy_pct: n(row.IMPORT_BASE_SAME),
+        imports_mom_pct: n(row.IMPORT_BASE_SEQUENTIAL),
+        exports_ytd_cumulative_usd_bn: (() => {
+          const v = n(row.EXIT_ACCUMULATE);
+          return v != null ? Math.round((v / 1e6) * 1e2) / 1e2 : null;
+        })(),
+        exports_ytd_yoy_pct: n(row.EXIT_ACCUMULATE_SAME),
+        imports_ytd_cumulative_usd_bn: (() => {
+          const v = n(row.IMPORT_ACCUMULATE);
+          return v != null ? Math.round((v / 1e6) * 1e2) / 1e2 : null;
+        })(),
+        imports_ytd_yoy_pct: n(row.IMPORT_ACCUMULATE_SAME),
+        note: 'General Administration of Customs totals are quoted in USD here; Eastmoney’s underlying report carries them in thousand-USD, converted to USD billions.',
+      };
+    }
+    default:
+      return { period, ...row };
+  }
+}
+
+async function chinaMacroIndicator(args: Record<string, unknown>) {
+  const indicator = typeof args.indicator === 'string' ? args.indicator : '';
+  const reportName = INDICATOR_REPORTS[indicator];
+  if (!reportName) {
+    return {
+      found: false,
+      message: `Unknown indicator "${indicator}". Valid values: ${Object.keys(INDICATOR_REPORTS).join(', ')}.`,
+    };
+  }
+  const periodsArg = num(args.periods);
+  const periods = periodsArg != null && periodsArg > 0 ? Math.min(Math.trunc(periodsArg), 36) : 12;
+
+  const rowsRaw = await eastmoneyQuery(reportName, { pageSize: String(periods) });
+  if (rowsRaw.length === 0) {
+    return {
+      found: false,
+      indicator,
+      message: 'Eastmoney’s data centre returned no rows for this report right now — retry shortly.',
+      source: 'National Bureau of Statistics of China, via Eastmoney data centre (keyless)',
+    };
+  }
+
+  const history = rowsRaw.map((r) => mapIndicatorRow(indicator, r));
+  const latest = history[0] ?? null;
+
+  return {
+    found: true,
+    indicator,
+    indicator_label: INDICATOR_LABELS[indicator] ?? indicator,
+    latest,
+    returned: history.length,
+    history,
+    data_as_of: latest?.period ?? null,
+    source:
+      indicator === 'trade'
+        ? 'General Administration of Customs of China, monthly trade totals, via Eastmoney data centre (keyless)'
+        : 'National Bureau of Statistics of China, via Eastmoney data centre (keyless)',
+  };
+}
+
+// ── china_house_prices ──────────────────────────────────────────────
+
+const HOUSE_PRICE_REPORT = 'RPT_ECONOMY_HOUSE_PRICE';
+
+// NBS covers exactly 70 cities in this release. Chinese name -> English name,
+// built from the live city list returned by the report itself (2026-10-18).
+const CITY_EN: Record<string, string> = {
+  '三亚': 'Sanya', '上海': 'Shanghai', '丹东': 'Dandong', '乌鲁木齐': 'Urumqi',
+  '九江': 'Jiujiang', '兰州': 'Lanzhou', '包头': 'Baotou', '北京': 'Beijing',
+  '北海': 'Beihai', '南京': 'Nanjing', '南充': 'Nanchong', '南宁': 'Nanning',
+  '南昌': 'Nanchang', '厦门': 'Xiamen', '合肥': 'Hefei', '吉林': 'Jilin',
+  '呼和浩特': 'Hohhot', '哈尔滨': 'Harbin', '唐山': 'Tangshan', '大理': 'Dali',
+  '大连': 'Dalian', '天津': 'Tianjin', '太原': 'Taiyuan', '宁波': 'Ningbo',
+  '安庆': 'Anqing', '宜昌': 'Yichang', '岳阳': 'Yueyang', '常德': 'Changde',
+  '平顶山': 'Pingdingshan', '广州': 'Guangzhou', '徐州': 'Xuzhou', '惠州': 'Huizhou',
+  '成都': 'Chengdu', '扬州': 'Yangzhou', '无锡': 'Wuxi', '昆明': 'Kunming',
+  '杭州': 'Hangzhou', '桂林': 'Guilin', '武汉': 'Wuhan', '沈阳': 'Shenyang',
+  '泉州': 'Quanzhou', '泸州': 'Luzhou', '洛阳': 'Luoyang', '济南': 'Jinan',
+  '济宁': 'Jining', '海口': 'Haikou', '深圳': 'Shenzhen', '温州': 'Wenzhou',
+  '湛江': 'Zhanjiang', '烟台': 'Yantai', '牡丹江': 'Mudanjiang', '石家庄': 'Shijiazhuang',
+  '福州': 'Fuzhou', '秦皇岛': 'Qinhuangdao', '蚌埠': 'Bengbu', '襄阳': 'Xiangyang',
+  '西宁': 'Xining', '西安': "Xi'an", '贵阳': 'Guiyang', '赣州': 'Ganzhou',
+  '遵义': 'Zunyi', '郑州': 'Zhengzhou', '重庆': 'Chongqing', '金华': 'Jinhua',
+  '银川': 'Yinchuan', '锦州': 'Jinzhou', '长春': 'Changchun', '长沙': 'Changsha',
+  '青岛': 'Qingdao', '韶关': 'Shaoguan',
+};
+const CITY_EN_TO_CN: Record<string, string> = Object.fromEntries(Object.entries(CITY_EN).map(([cn, en]) => [en.toLowerCase(), cn]));
+
+function mapHousePriceRow(row: Record<string, unknown>) {
+  const cn = typeof row.CITY === 'string' ? row.CITY : null;
+  return {
+    period: periodFromReportDate(row.REPORT_DATE),
+    city: cn ? CITY_EN[cn] ?? cn : null,
+    city_cn: cn,
+    new_build_index_yoy_prior_year_eq_100: num(row.FIRST_COMHOUSE_SAME),
+    new_build_index_mom_prior_month_eq_100: num(row.FIRST_COMHOUSE_SEQUENTIAL),
+    resale_index_yoy_prior_year_eq_100: num(row.SECOND_HOUSE_SAME),
+    resale_index_mom_prior_month_eq_100: num(row.SECOND_HOUSE_SEQUENTIAL),
+  };
+}
+
+async function chinaHousePrices(args: Record<string, unknown>) {
+  const cityArg = typeof args.city === 'string' ? args.city.trim() : '';
+  const monthArg = typeof args.month === 'string' ? args.month.trim() : '';
+
+  const filters: string[] = [];
+  let cityCn: string | null = null;
+  if (cityArg) {
+    cityCn = CITY_EN[cityArg] ? cityArg : CITY_EN_TO_CN[cityArg.toLowerCase()] ?? null;
+    if (!cityCn) {
+      return {
+        found: false,
+        message: `"${cityArg}" is not one of the 70 cities NBS covers in this release. Call without \`city\` to see the full list (one row per city for the latest month).`,
+        cities: Object.values(CITY_EN).sort(),
+      };
+    }
+    filters.push(`(CITY="${cityCn}")`);
+  }
+  if (monthArg && /^\d{4}-\d{2}$/.test(monthArg)) {
+    filters.push(`(REPORT_DATE='${monthArg}-01 00:00:00')`);
+  }
+
+  const extra: Record<string, string> = {};
+  if (filters.length > 0) extra.filter = filters.join(' and ');
+  // One city, no month -> up to 24 months of that city's history. No city
+  // (any month) -> that month's full 70-city cross-section, sorted by city.
+  if (cityCn && !monthArg) {
+    extra.pageSize = '24';
+  } else if (!cityCn) {
+    extra.pageSize = '70';
+  } else {
+    extra.pageSize = '5';
+  }
+
+  const rowsRaw = await eastmoneyQuery(HOUSE_PRICE_REPORT, extra);
+  if (rowsRaw.length === 0) {
+    return {
+      found: false,
+      message: 'Eastmoney’s data centre returned no rows for this city/month combination — retry shortly, or try without `month` for the latest release.',
+      source: 'National Bureau of Statistics of China, 70-city residential price index, via Eastmoney data centre (keyless)',
+    };
+  }
+
+  // No city filter: the server-side sort mixes months if more than one
+  // period is present; pin to the most recent REPORT_DATE in the page.
+  let rows = rowsRaw;
+  if (!cityCn) {
+    const latestPeriod = rowsRaw.reduce<string | null>((best, r) => {
+      const p = typeof r.REPORT_DATE === 'string' ? r.REPORT_DATE : null;
+      return p && (best === null || p > best) ? p : best;
+    }, null);
+    rows = rowsRaw.filter((r) => r.REPORT_DATE === latestPeriod);
+  }
+
+  const mapped = rows.map(mapHousePriceRow);
+  const data_as_of = mapped[0]?.period ?? null;
+
+  return {
+    found: true,
+    note: 'Indexes use the prior period (same month last year for *_yoy, prior month for *_mom) = 100 — a value above 100 is a price rise, below 100 a fall. new_build = 新建商品住宅价格指数 (newly-built commercial residential); resale = 二手住宅价格指数 (existing/resale residential).',
+    cities_returned: cityCn ? 1 : new Set(mapped.map((r) => r.city_cn)).size,
+    returned: mapped.length,
+    data_as_of,
+    rows: mapped,
+    source: 'National Bureau of Statistics of China, 70-city residential price index, via Eastmoney data centre (keyless)',
+  };
+}
+
+// ── china_rates: SHIBOR + CGB yield curve ───────────────────────────
+
+const SHIBOR_LATEST_URL = 'https://www.chinamoney.com.cn/r/cms/www/chinamoney/data/shibor/shibor.json';
+const SHIBOR_HIS_BASE = 'https://www.chinamoney.com.cn/ags/ms/cm-u-bk-shibor/ShiborHis';
+const SDDS_GOV_YIELD_URL = 'https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/SddsIntrRateGovYldHis';
+const RTIME_YLD_CURV_URL = 'https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/RtimeYldCurv';
+const CM_SHIBOR_REFERER = 'https://www.chinamoney.com.cn/chinese/bkshibor/';
+const CM_SDDS_REFERER = 'https://www.chinamoney.com.cn/chinese/sddsintigy/';
+const CM_CURVE_REFERER = 'https://www.chinamoney.com.cn/chinese/bkcurvrty/';
+
+const SHIBOR_TENORS = ['ON', '1W', '2W', '1M', '3M', '6M', '9M', '1Y'] as const;
+const SHIBOR_TENOR_LABEL: Record<string, string> = {
+  ON: 'overnight', '1W': '1-week', '2W': '2-week', '1M': '1-month',
+  '3M': '3-month', '6M': '6-month', '9M': '9-month', '1Y': '1-year',
+};
+
+function isoDaysAgo(days: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+async function chinaRatesShibor(args: Record<string, unknown>) {
+  const daysArg = num(args.days);
+  // ~1 calendar month of history if omitted; SHIBOR fixes on every CN
+  // business day, so request extra calendar days to clear weekends/holidays.
+  const days = daysArg != null && daysArg > 0 ? Math.min(Math.trunc(daysArg), 365) : 30;
+
+  const [latestRes, hisRes] = await Promise.all([
+    pwFetchCM(SHIBOR_LATEST_URL, CM_SHIBOR_REFERER, 'SHIBOR latest fixing (chinamoney.com.cn)'),
+    pwFetchCM(
+      `${SHIBOR_HIS_BASE}?lang=CN&startDate=${isoDaysAgo(days)}&endDate=${isoDaysAgo(0)}`,
+      CM_SHIBOR_REFERER,
+      'SHIBOR history (chinamoney.com.cn)',
+    ),
+  ]);
+  if (!latestRes.ok) throw await httpError(latestRes, 'SHIBOR latest fixing (chinamoney.com.cn)');
+  if (!hisRes.ok) throw await httpError(hisRes, 'SHIBOR history (chinamoney.com.cn)');
+
+  const latestBody = (await latestRes.json()) as { data?: { showDateCN?: string }; records?: Array<{ termCode?: string; shibor?: string }> };
+  const hisBody = (await hisRes.json()) as { data?: { startDateCN?: string; endDateCN?: string }; records?: Array<Record<string, string>> };
+
+  const latestByTerm: Record<string, number | null> = {};
+  for (const r of latestBody.records ?? []) {
+    // The latest-fixing endpoint spells overnight "O/N"; the history
+    // endpoint spells it "ON" — normalize so both share one tenor key.
+    if (r.termCode) latestByTerm[r.termCode === 'O/N' ? 'ON' : r.termCode] = num(r.shibor);
+  }
+  const latest: Record<string, unknown> = { reference_date: latestBody.data?.showDateCN ?? null };
+  for (const t of SHIBOR_TENORS) latest[`${SHIBOR_TENOR_LABEL[t]}_pct`] = latestByTerm[t] ?? null;
+
+  const history = (hisBody.records ?? [])
+    .map((r) => {
+      const row: Record<string, unknown> = { date: r.showDateCN ?? null };
+      for (const t of SHIBOR_TENORS) row[`${SHIBOR_TENOR_LABEL[t]}_pct`] = num(r[t]);
+      return row;
+    })
+    .filter((r) => r.date != null)
+    .sort((a, b) => (String(a.date) < String(b.date) ? 1 : -1));
+
+  return {
+    found: true,
+    series: 'shibor',
+    latest,
+    range: { start: hisBody.data?.startDateCN ?? null, end: hisBody.data?.endDateCN ?? null },
+    returned: history.length,
+    history,
+    data_as_of: latest.reference_date ?? null,
+    note: 'Shanghai Interbank Offered Rate — the benchmark unsecured interbank lending rate, fixed each CN business day at 11:00 Beijing time as a trimmed average of 18 quoting banks’ submissions across 8 tenors.',
+    source: 'China Foreign Exchange Trade System / National Interbank Funding Center, Shibor fixing (keyless)',
+  };
+}
+
+async function chinaRatesYieldCurve(args: Record<string, unknown>) {
+  const periodsArg = num(args.periods);
+  const periods = periodsArg != null && periodsArg > 0 ? Math.min(Math.trunc(periodsArg), 60) : 20;
+
+  const [sddsRes, curveRes] = await Promise.all([
+    pwFetchCM(`${SDDS_GOV_YIELD_URL}?lang=CN&pageNum=1&pageSize=${periods}`, CM_SDDS_REFERER, 'China Government Bond 1Y/10Y yield history (chinamoney.com.cn)'),
+    pwFetchCM(`${RTIME_YLD_CURV_URL}?lang=CN&bondType=100101`, CM_CURVE_REFERER, 'China Government Bond real-time yield curve (chinamoney.com.cn)'),
+  ]);
+  if (!sddsRes.ok) throw await httpError(sddsRes, 'China Government Bond 1Y/10Y yield history (chinamoney.com.cn)');
+  if (!curveRes.ok) throw await httpError(curveRes, 'China Government Bond real-time yield curve (chinamoney.com.cn)');
+
+  const sddsBody = (await sddsRes.json()) as {
+    data?: { startDateCN?: string; endDateCN?: string };
+    records?: Array<{ dateString?: string; oneRate?: string; tenRate?: string }>;
+  };
+  const curveBody = (await curveRes.json()) as {
+    data?: {
+      date?: string;
+      records?: unknown;
+    };
+    records?: Array<{ bondcode?: string; name?: string; tl?: number; remainingMaturity?: number; buyYield?: number; sellYield?: number; avgYield?: number }>;
+  };
+
+  const benchmarkHistory = (sddsBody.records ?? [])
+    .map((r) => ({ date: r.dateString ?? null, yield_1y_pct: num(r.oneRate), yield_10y_pct: num(r.tenRate) }))
+    .filter((r) => r.date != null)
+    .sort((a, b) => (String(a.date) < String(b.date) ? 1 : -1));
+
+  const curvePoints = (curveBody.records ?? [])
+    .map((r) => ({
+      bond_name: r.name ?? null,
+      remaining_maturity_years: typeof r.remainingMaturity === 'number' ? r.remainingMaturity : null,
+      buy_yield_pct: typeof r.buyYield === 'number' ? r.buyYield : null,
+      sell_yield_pct: typeof r.sellYield === 'number' ? r.sellYield : null,
+      mid_yield_pct: typeof r.avgYield === 'number' ? r.avgYield : null,
+    }))
+    .filter((p) => p.remaining_maturity_years != null)
+    .sort((a, b) => (a.remaining_maturity_years! - b.remaining_maturity_years!));
+
+  const latestBenchmark = benchmarkHistory[0] ?? null;
+  const tenY = curvePoints.length > 0
+    ? curvePoints.reduce((best, p) => (Math.abs(p.remaining_maturity_years! - 10) < Math.abs(best.remaining_maturity_years! - 10) ? p : best))
+    : null;
+
+  return {
+    found: true,
+    series: 'yield_curve',
+    latest_1y_10y: latestBenchmark,
+    curve_date: curveBody.data?.date ?? null,
+    curve_closest_to_10y: tenY,
+    curve_points_returned: curvePoints.length,
+    curve_points: curvePoints,
+    benchmark_history_returned: benchmarkHistory.length,
+    benchmark_history: benchmarkHistory,
+    data_as_of: curveBody.data?.date ?? latestBenchmark?.date ?? null,
+    note: 'latest_1y_10y/benchmark_history are the IMF SDDS-disclosure 1-year and 10-year China Government Bond yields (dated, daily). curve_points is the full real-time quoted-yield curve across all actively-quoted CGB maturities (CFETS best bid/ask/mid), from ~1 month to ~50 years remaining maturity, for Treasury bonds (bondType 100101) — the closest keyless equivalent to a standard tenor-by-tenor curve.',
+    source: 'China Foreign Exchange Trade System, China Government Bond yields (keyless)',
+  };
+}
+
 async function lprLatest() {
   const res = await pwFetch(LATEST_URL, 'PBOC LPR latest print (chinamoney.com.cn)');
   if (!res.ok) throw await httpError(res, 'PBOC LPR latest print (chinamoney.com.cn)');
@@ -823,6 +1326,52 @@ const tools: McpToolExport['tools'] = [
       "China's most recent PBOC Loan Prime Rate (贷款市场报价利率一年期/五年期, LPR 1Y/5Y) print only — a cheap single-row call for just the current 1-year and 5-year rates and their official reference/announcement date, without the 12-month history. Use china_lpr instead if you need the trend over time. Keyless, sourced live from chinamoney.com.cn.",
     inputSchema: { type: 'object' as const, properties: {} },
   },
+  {
+    name: 'china_macro_indicator',
+    description:
+      "China's headline National Bureau of Statistics (NBS) macro indicators — one tool, pick an `indicator`: `cpi` (Consumer Price Index, national/urban/rural, y/y + m/m), `ppi` (Producer Price Index), `pmi` (manufacturing + non-manufacturing Purchasing Managers' Index), `gdp` (quarterly GDP, published as year-to-date cumulative, by sector), `industrial_production` (industrial value-added growth), `retail_sales` (total retail sales of consumer goods), `fixed_asset_investment` (FAI), `money_supply` (M0/M1/M2 outstanding + growth), or `trade` (General Administration of Customs monthly export/import totals in USD). Returns the latest period's values first (with its period, e.g. \"2026-09\"), then up to `periods` months/quarters of history, newest first — every Chinese NBS field name translated to an English name with its unit and the index convention it uses (prior-period = 100 unless stated otherwise). Answers \"China's latest CPI\", \"China PMI history\", \"China Q2 GDP growth\", \"China M2 money supply\", \"China's trade surplus last month\". Keyless, sourced live from the National Bureau of Statistics of China (General Administration of Customs for `trade`), via Eastmoney's data centre.",
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        indicator: {
+          type: 'string',
+          enum: ['cpi', 'ppi', 'pmi', 'gdp', 'industrial_production', 'retail_sales', 'fixed_asset_investment', 'money_supply', 'trade'],
+          description: 'Which NBS/Customs indicator to return.',
+        },
+        periods: {
+          type: 'number',
+          description: 'How many of the most recent monthly/quarterly rows to return, 1-36 (default 12).',
+        },
+      },
+      required: ['indicator'],
+    },
+  },
+  {
+    name: 'china_house_prices',
+    description:
+      "China's NBS 70-city residential price indexes — new-build commercial housing (新建商品住宅) and resale/existing housing (二手住宅), year-on-year and month-on-month, for Beijing, Shanghai, Shenzhen, and 67 other NBS-tracked cities. Pass `city` (English name, e.g. \"Beijing\") for that city's history (up to 24 months); pass `month` (\"YYYY-MM\") to pin a specific release; pass neither for the latest month's full 70-city cross-section. Index values use the prior period = 100 convention (e.g. 97.7 = a 2.3% year-on-year fall). Answers \"Beijing home price index\", \"which Chinese cities have falling house prices\", \"China 70-city house price index for August\". Keyless, sourced live from the National Bureau of Statistics of China, via Eastmoney's data centre.",
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        city: { type: 'string', description: 'One of the 70 NBS-tracked cities, by English name (e.g. "Shanghai", "Chengdu"). Omit for all 70 cities in the latest month.' },
+        month: { type: 'string', description: 'A specific release month as "YYYY-MM" (e.g. "2026-08"). Omit for the latest available month.' },
+      },
+    },
+  },
+  {
+    name: 'china_rates',
+    description:
+      "China's money-market and government-bond benchmark rates. `series: \"shibor\"` returns the Shanghai Interbank Offered Rate across all 8 tenors (overnight through 1-year) — the latest 11:00-Beijing-time fixing plus up to `days` of daily history. `series: \"yield_curve\"` returns the China Government Bond yield curve: the dated 1-year/10-year benchmark series (IMF SDDS disclosure) plus CFETS's real-time quoted-yield curve across every actively-traded CGB maturity (~1 month to ~50 years). Answers \"current SHIBOR rates\", \"China's 10-year government bond yield\", \"China yield curve history\". Keyless, sourced live from the China Foreign Exchange Trade System / National Interbank Funding Center.",
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        series: { type: 'string', enum: ['shibor', 'yield_curve'], description: 'Which rate series to return.' },
+        days: { type: 'number', description: '(shibor only) How many calendar days of history to request, 1-365 (default 30).' },
+        periods: { type: 'number', description: '(yield_curve only) How many daily rows of the 1Y/10Y benchmark history to return, 1-60 (default 20).' },
+      },
+      required: ['series'],
+    },
+  },
 ];
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -831,6 +1380,16 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       return lprHistory(args);
     case 'china_lpr_latest':
       return lprLatest();
+    case 'china_macro_indicator':
+      return chinaMacroIndicator(args);
+    case 'china_house_prices':
+      return chinaHousePrices(args);
+    case 'china_rates': {
+      const series = typeof args.series === 'string' ? args.series : '';
+      if (series === 'shibor') return chinaRatesShibor(args);
+      if (series === 'yield_curve') return chinaRatesYieldCurve(args);
+      return { found: false, message: `Unknown series "${series}". Valid values: shibor, yield_curve.` };
+    }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
