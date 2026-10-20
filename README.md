@@ -4,7 +4,7 @@ China's PBOC Loan Prime Rate (贷款市场报价利率, LPR), National Bureau of
 Statistics headline indicators, 70-city house prices, SHIBOR and the
 government-bond yield curve — all keyless, sourced live.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1837+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1854+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
@@ -117,7 +117,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1837+ data sources. The
+Both URLs reach the same gateway and the same 1854+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
