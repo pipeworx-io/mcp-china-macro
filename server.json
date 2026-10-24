@@ -3,7 +3,7 @@
   "name": "io.github.pipeworx-io/china-macro",
   "title": "China Macro",
   "description": "China macro: PBOC Loan Prime Rate, headline NBS indicators (via Eastmoney's data centre), 70-city…",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "websiteUrl": "https://pipeworx.io/packs/china-macro",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-china-macro",
