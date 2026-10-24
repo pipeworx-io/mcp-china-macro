@@ -1081,7 +1081,7 @@ async function lprHistory(args: Record<string, unknown>) {
     return {
       found: false,
       message: 'chinamoney.com.cn returned no LPR history rows (upstream may be mid-update around the monthly 20th announcement) — retry shortly.',
-      source: 'chinamoney.com.cn (National Interbank Funding Center, keyless)',
+      source: 'National Interbank Funding Center, under PBOC authorization, Loan Prime Rate (keyless)',
     };
   }
 
@@ -1101,11 +1101,11 @@ async function lprHistory(args: Record<string, unknown>) {
   return {
     found: true,
     range: { start: body.data?.startDateCN ?? null, end: body.data?.endDateCN ?? null },
-    note: 'Rolling window of the most recent monthly LPR announcements (chinamoney.com.cn does not expose deeper history via this endpoint). LPR is announced monthly on the 20th (or next business day) by the National Interbank Funding Center under PBOC authorization; 1Y anchors most corporate/consumer loans, 5Y anchors mortgages.',
+    note: 'Rolling window of the most recent monthly LPR announcements (the publisher exposes only a rolling ~1-year window). LPR is announced monthly on the 20th (or next business day) by the National Interbank Funding Center under PBOC authorization; 1Y anchors most corporate/consumer loans, 5Y anchors mortgages.',
     latest,
     returned: rows.length,
     rows,
-    source: 'chinamoney.com.cn (National Interbank Funding Center, keyless) — 贷款市场报价利率 (LPR)',
+    source: 'National Interbank Funding Center, under PBOC authorization, Loan Prime Rate (keyless)',
   };
 }
 
@@ -1551,7 +1551,7 @@ async function lprLatest() {
     return {
       found: false,
       message: 'chinamoney.com.cn returned no LPR print — upstream may be mid-update.',
-      source: 'chinamoney.com.cn (National Interbank Funding Center, keyless)',
+      source: 'National Interbank Funding Center, under PBOC authorization, Loan Prime Rate (keyless)',
     };
   }
   const byTerm: Record<string, number | null> = {};
@@ -1565,7 +1565,7 @@ async function lprLatest() {
     lpr_1y_pct: byTerm['1Y'] ?? null,
     lpr_5y_pct: byTerm['5Y'] ?? null,
     note: '1Y anchors most corporate/consumer loans, 5Y anchors mortgages. Announced monthly on the 20th (or next business day).',
-    source: 'chinamoney.com.cn (National Interbank Funding Center, keyless) — 贷款市场报价利率 (LPR)',
+    source: 'National Interbank Funding Center, under PBOC authorization, Loan Prime Rate (keyless)',
   };
 }
 
@@ -1573,7 +1573,7 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'china_lpr',
     description:
-      "China's PBOC Loan Prime Rate (贷款市场报价利率, LPR) history — the 1-year and 5-year benchmark lending rates, each with its official reference/announcement date. Published monthly on the 20th (or next business day) by the National Interbank Funding Center under PBOC authorization. The 1-year rate anchors most corporate and consumer loans; the 5-year rate anchors mortgages. Returns up to the last 12 monthly announcements (chinamoney.com.cn does not expose history deeper than ~1 year via this endpoint) plus a `latest` field for the most recent print. Answers \"what is the current PBOC LPR\", \"China's 1-year and 5-year loan prime rate history\", \"when did the PBOC last cut the LPR\". Keyless, sourced live from chinamoney.com.cn.",
+      "China's PBOC Loan Prime Rate (贷款市场报价利率, LPR) history — the 1-year and 5-year benchmark lending rates, each with its official reference/announcement date. Published monthly on the 20th (or next business day) by the National Interbank Funding Center under PBOC authorization. The 1-year rate anchors most corporate and consumer loans; the 5-year rate anchors mortgages. Returns up to the last 12 monthly announcements (the publisher exposes only a rolling ~1-year window) plus a `latest` field for the most recent print. Answers \"what is the current PBOC LPR\", \"China's 1-year and 5-year loan prime rate history\", \"when did the PBOC last cut the LPR\". Keyless, sourced live from the National Interbank Funding Center, under PBOC authorization.",
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -1587,7 +1587,7 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'china_lpr_latest',
     description:
-      "China's most recent PBOC Loan Prime Rate (贷款市场报价利率一年期/五年期, LPR 1Y/5Y) print only — a cheap single-row call for just the current 1-year and 5-year rates and their official reference/announcement date, without the 12-month history. Use china_lpr instead if you need the trend over time. Keyless, sourced live from chinamoney.com.cn.",
+      "China's most recent PBOC Loan Prime Rate (贷款市场报价利率一年期/五年期, LPR 1Y/5Y) print only — a cheap single-row call for just the current 1-year and 5-year rates and their official reference/announcement date, without the 12-month history. Use china_lpr instead if you need the trend over time. Keyless, sourced live from the National Interbank Funding Center, under PBOC authorization.",
     inputSchema: { type: 'object' as const, properties: {} },
   },
   {
