@@ -988,6 +988,7 @@ async function parseJsonBounded<T>(
  *    (国债/Treasury Bond) against the `RtimeYldCurv` endpoint.
  */
 
+import { NBS_SERIES, NBS_ONLY_INDICATORS, NBS_LABELS, nbsNational, nbsRegional } from './nbs.js';
 
 const UA = 'pipeworx-mcp-china-macro/1.0 (+https://pipeworx.io)';
 const REFERER = 'https://www.chinamoney.com.cn/en/index.html';
@@ -1263,6 +1264,30 @@ function mapIndicatorRow(indicator: string, row: Record<string, unknown>): Recor
 
 async function chinaMacroIndicator(args: Record<string, unknown>) {
   const indicator = typeof args.indicator === 'string' ? args.indicator : '';
+  const region = typeof args.region === 'string' && args.region.trim() ? args.region.trim() : null;
+  const sourceArg = typeof args.source === 'string' ? args.source.trim().toLowerCase() : '';
+  const seriesArg = typeof args.series === 'string' && args.series.trim() ? args.series.trim() : null;
+  const periodArg = typeof args.period === 'string' && args.period.trim() ? args.period.trim() : null;
+  if (sourceArg && sourceArg !== 'nbs' && sourceArg !== 'eastmoney') {
+    return { found: false, message: `Unknown source "${sourceArg}". Valid values: nbs, eastmoney.` };
+  }
+  const wantsNbs = sourceArg === 'nbs' || region != null || NBS_ONLY_INDICATORS.includes(indicator) || seriesArg != null;
+  if (wantsNbs) {
+    if (sourceArg === 'eastmoney') {
+      return { found: false, message: 'region, series and the indicators urban_unemployment / capacity_utilization are served only by source "nbs".' };
+    }
+    if (!NBS_SERIES[indicator]) {
+      return { found: false, message: `The direct National Bureau of Statistics route does not carry "${indicator}". Valid values: ${Object.keys(NBS_SERIES).join(', ')}.` };
+    }
+    const nbsPeriods = (() => {
+      const n = num(args.periods);
+      return n != null && n > 0 ? Math.min(Math.trunc(n), 36) : 12;
+    })();
+    const res = region
+      ? await nbsRegional(indicator, region, periodArg, nbsPeriods, seriesArg)
+      : await nbsNational(indicator, nbsPeriods, seriesArg);
+    return NBS_LABELS[indicator] ? { indicator_label: NBS_LABELS[indicator], ...res } : res;
+  }
   const reportName = INDICATOR_REPORTS[indicator];
   if (!reportName) {
     return {
@@ -1593,18 +1618,35 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'china_macro_indicator',
     description:
-      "China's headline National Bureau of Statistics (NBS) macro indicators — one tool, pick an `indicator`: `cpi` (Consumer Price Index, national/urban/rural, y/y + m/m), `ppi` (Producer Price Index), `pmi` (manufacturing + non-manufacturing Purchasing Managers' Index), `gdp` (quarterly GDP, published as year-to-date cumulative, by sector), `industrial_production` (industrial value-added growth), `retail_sales` (total retail sales of consumer goods), `fixed_asset_investment` (FAI), `money_supply` (M0/M1/M2 outstanding + growth), or `trade` (General Administration of Customs monthly export/import totals in USD). Returns the latest period's values first (with its period, e.g. \"2026-09\"), then up to `periods` months/quarters of history, newest first — every Chinese NBS field name translated to an English name with its unit and the index convention it uses (prior-period = 100 unless stated otherwise). Answers \"China's latest CPI\", \"China PMI history\", \"China Q2 GDP growth\", \"China M2 money supply\", \"China's trade surplus last month\". Keyless, sourced live from the National Bureau of Statistics of China (General Administration of Customs for `trade`), via Eastmoney's data centre.",
+      "China's headline National Bureau of Statistics (NBS) macro indicators — one tool, pick an `indicator`: `cpi` (Consumer Price Index, national/urban/rural, y/y + m/m), `ppi` (Producer Price Index), `pmi` (manufacturing + non-manufacturing Purchasing Managers' Index), `gdp` (quarterly GDP, published as year-to-date cumulative, by sector), `industrial_production` (industrial value-added growth), `retail_sales` (total retail sales of consumer goods), `fixed_asset_investment` (FAI), `money_supply` (M0/M1/M2 outstanding + growth), or `trade` (General Administration of Customs monthly export/import totals in USD). Returns the latest period's values first (with its period, e.g. \"2026-09\"), then up to `periods` months/quarters of history, newest first — every Chinese NBS field name translated to an English name with its unit and the index convention it uses (prior-period = 100 unless stated otherwise). Answers \"China's latest CPI\", \"China PMI history\", \"China Q2 GDP growth\", \"China M2 money supply\", \"China's trade surplus last month\". Default route is a republisher's data centre. Pass `source: \"nbs\"` to read the National Bureau of Statistics of China's own database directly: every series then carries its period, period TYPE (single month/quarter vs year-to-date), measure (index vs percent change vs level), unit and base, exactly as published and never converted, and `data_as_of`. The direct route also adds `urban_unemployment` (surveyed urban unemployment rate) and `capacity_utilization` (industrial capacity utilisation, quarterly), and `region` (a province name, or `all` for the 31 mainland provincial-level regions in one period) for cpi, ppi, industrial_production, fixed_asset_investment and gdp. A series whose base cannot be established from the publisher's own label comes back basis_status \"unresolved\" rather than guessed. Keyless, sourced live from the National Bureau of Statistics of China (General Administration of Customs for `trade`).",
     inputSchema: {
       type: 'object' as const,
       properties: {
         indicator: {
           type: 'string',
-          enum: ['cpi', 'ppi', 'pmi', 'gdp', 'industrial_production', 'retail_sales', 'fixed_asset_investment', 'money_supply', 'trade'],
+          enum: ['cpi', 'ppi', 'pmi', 'gdp', 'industrial_production', 'retail_sales', 'fixed_asset_investment', 'money_supply', 'trade', 'urban_unemployment', 'capacity_utilization'],
           description: 'Which NBS/Customs indicator to return.',
         },
         periods: {
           type: 'number',
           description: 'How many of the most recent monthly/quarterly rows to return, 1-36 (default 12).',
+        },
+        source: {
+          type: 'string',
+          enum: ['eastmoney', 'nbs'],
+          description: 'Which route serves the data. Default "eastmoney" (republisher). "nbs" reads the National Bureau of Statistics of China directly and returns typed series (period type, measure, unit, base). Implied by region, series, urban_unemployment and capacity_utilization.',
+        },
+        region: {
+          type: 'string',
+          description: '(source nbs) A mainland province by English or Chinese name (e.g. "Guangdong", "广东省") for that region\'s history, or "all" for all 31 mainland provincial-level regions in one period. Available for cpi, ppi, industrial_production, fixed_asset_investment, gdp.',
+        },
+        series: {
+          type: 'string',
+          description: '(source nbs) Return one named series only, e.g. "cpi_yoy_index", "cpi_mom_index", "ppi_yoy_index", "manufacturing_pmi". Omit for every series of the indicator; an unknown name lists the valid ones.',
+        },
+        period: {
+          type: 'string',
+          description: '(source nbs, region "all") The period to cross-section: "YYYY-MM" for monthly series, "YYYY-Qn" for quarterly ones. Omit for the latest period with data.',
         },
       },
       required: ['indicator'],

@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-china-macro",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "China macro: PBOC Loan Prime Rate, headline NBS indicators (via Eastmoney's data centre), 70-city house prices, SHIBOR and the CGB yield curve. Keyless.",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-e036c2d0639a202c6e06e872c86332a77316f09631ed87680c94cb8a28f0b452",
-    "sourceCommit": "01241619b78233fd55d0e3612331499a63f03ae7"
+    "sourceHash": "v1-0f89c4124ea60b68e9c905d082d3a0e2ac80961cdda6b90455c03c1b6c817239",
+    "sourceCommit": "722087a9bda73f85942e8f6bbfd598544cb0d490"
   }
 }
